@@ -24,7 +24,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .. import similarity, toolchains
-from ..forks import catalog, csource, datadiff, drafts, dtksplits, ghidra, scratch_dsd, scratch_dtk
+from ..forks import catalog, csource, datadiff, drafts, dtksplits, ghidra, scratch_dsd, scratch_dtk, scratch_unity
 from ..forks.objdiff import ObjdiffError
 from ..forks.project import EDITABLE, STATE, ForkError, ForkProject
 from ..network import Agent, Network, NetworkError
@@ -297,18 +297,24 @@ class ForkEngine:
             self.net._event(db, pid, None, "fork", event)
 
     def create_scratch(self, game: Path, *, compiler: str | None = None, log=print) -> str:
-        """A GameCube, Wii or DS game, from scratch: generate the community's project layout for it (dtk-template,
-        ds-decomp) and open it like a fork."""
-        with open(game, "rb") as f:
-            ds = scratch_dsd.is_nds(f.read(0x200))
-        maker = scratch_dsd if ds else scratch_dtk
+        """A GameCube, Wii, DS or Unity (IL2CPP) game, from scratch: generate the community's project layout
+        for it (dtk-template, ds-decomp, or an objdiff project made from GameAssembly.dll) and open it like a
+        fork."""
+        game = Path(game)
+        nds = False
+        if game.is_file():
+            with open(game, "rb") as f:
+                nds = scratch_dsd.is_nds(f.read(0x200))
+        unity = not nds and scratch_unity.is_unity(game)
+        maker = scratch_dsd if nds else scratch_unity if unity else scratch_dtk
         info = maker.game_info(game)
-        sha1 = info["sha1"] if ds else hashlib.sha1(info["dol"]).hexdigest()
+        sha1 = info.get("sha1") or hashlib.sha1(info["dol"]).hexdigest()
         for p in self.net.store.all("SELECT slug, config FROM projects"):
             if json.loads(p["config"]).get("program_sha1") == sha1:
                 log(f"already set up as {p['slug']}")
                 return p["slug"]
-        slug = self._free_slug(_slug(f"{info['title']} {info['id']}" if info.get("kind") != "dol" else info["title"]))
+        name = info["title"] if unity else (f"{info['title']} {info['id']}" if info.get("kind") != "dol" else info["title"])
+        slug = self._free_slug(_slug(name))
         dest = self.net.workspace / slug
         try:
             facts = maker.create(dest, game, compiler=compiler, log=log)
@@ -321,7 +327,10 @@ class ForkEngine:
                "legal": {"basis": "personal-copy", "license": "personal use only",
                          "statement": "imported by the owner of this copy of the game, who confirmed it was legally obtained",
                          "confirmed_at": time.time()}}
-        self._register(slug, facts["title"], f"{catalog.PLATFORMS[facts['platform']]} game {facts['id']}, from scratch",
+        if unity:
+            cfg["unity"] = facts.get("unity", "")
+        kind = "Windows PC Unity" if unity else catalog.PLATFORMS.get(facts["platform"], facts["platform"])
+        self._register(slug, facts["title"], f"{kind} game, from scratch",
                        dest, cfg, f"started {facts['id']} from scratch")
         self.check(slug, log=log)
         return slug
@@ -1134,7 +1143,9 @@ class ForkEngine:
         units = fp.units() if cfg.get("ready") else []
         scratch = next((u.scratch for u in units if u.scratch), None) or {}
         platform = catalog.PLATFORMS.get(cfg.get("platform"), cfg.get("platform") or "unknown platform")
-        return (f"{proj['name']}: a fork of {cfg['repo_url']} ({platform}{', ' + cfg['version'] if cfg.get('version') else ''})\n"
+        what = ("started from scratch" if cfg.get("origin") == "scratch" else f"a fork of {cfg['repo_url']}")
+        where = f"{platform}, {cfg['version']}" if cfg.get("version") else platform
+        return (f"{proj['name']}: {what} ({where})\n"
                 f"progress: {m.get('matched_functions', '?')}/{m.get('total_functions', '?')} functions, "
                 f"{float(m.get('matched_code_percent', 0) or 0):.2f}% of code, in {len(units)} source files\n"
                 f"compiler: {scratch.get('compiler', 'set by the project build')} {scratch.get('c_flags', '')}\n"
@@ -1855,7 +1866,7 @@ class ForkEngine:
             "slug": slug, "title": proj["name"], "description": proj["description"], "kind": "fork",
             "platform": cfg.get("platform"), "platform_name": catalog.PLATFORMS.get(cfg.get("platform"), cfg.get("platform") or ""),
             "repo_url": cfg.get("repo_url"), "fork_kind": cfg.get("fork_kind"), "version": cfg.get("version"),
-            "origin": cfg.get("origin"), "compiler_name": cfg.get("compiler"),
+            "origin": cfg.get("origin"), "compiler_name": cfg.get("compiler"), "unity": cfg.get("unity") or "",
             "versions": fp.versions(), "ready": bool(cfg.get("ready")), "needs": need,
             "rom": {"game_code": cfg.get("version") or "", "region": catalog.PLATFORMS.get(cfg.get("platform"), ""),
                     "title": proj["name"]},

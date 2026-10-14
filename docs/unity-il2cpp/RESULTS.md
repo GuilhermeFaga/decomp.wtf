@@ -14,7 +14,7 @@ Data: 2026-10-14 · Spike de viabilidade do plano `docs/unity-il2cpp-plan.md`.
 | S0 | Projeto objdiff aberto como fork no app (zero patch) | ✅ clone local → `kind=objdiff` → `check` mediu: `0/3 functions, fuzzy 49.4%`, listado como `win32`/“Windows PC” |
 | S1 | objdiff-cli 3.8.2 × COFF x86-64 (clang) | ✅ `diff`/`report` com % por símbolo e rows por instrução |
 | S2 | Inventário unificado (`.pdata` + mapa de símbolos) | ✅ **135.954** funções `.pdata`; **53.063/63.520** métodos com start exato; funções conhecidas das sessões validam |
-| S3 | Draft x86 via Ghidra (decomp já tem `forks/ghidra.py`) | ⏳ pendente (baixo risco; Ghidra 12.1.4 presente) |
+| S3 | Draft x86 via Ghidra (decomp já tem `forks/ghidra.py`) | ✅ Ghidra 12.1.4 instalado no registry; claim no `game-real` devolve draft real |
 | S4 | Delink mínimo + diff real (alvo COFF sintético com relocs) | ✅ 3/3 funções comparadas: 39.75% / 36.0% / 64.4% (clang × MSVC) |
 | S5 | Proximidade clang-cl × MSVC (20 funções) | ⏳ pendente (depende da decisão sobre toolchain MSVC) |
 
@@ -84,7 +84,44 @@ $OD --no-color diff -1 s4/target_1aa0.obj -2 s4/base_1aa0.obj -c functionRelocDi
 
 ## Pendências do F0
 
-- **S3**: draft Ghidra num objeto sintético (verificar `forks/ghidra.py` com x86-64 — o caminho já existe).
+- ~~**S3**~~: ✅ feito na F1 (Ghidra instalado e draft validado no `game-real`).
 - **S5**: medir clang×MSVC em ~20 funções (precisa da decisão sobre a toolchain MSVC).
-- **Decisões do plano (§7)**: fork upstream × branch local; aceitar MSVC proprietário; escopo do MVP
-  (`Assembly-CSharp` × DLL inteira); iniciar F1.
+- **Decisões do plano (§7)**: fork upstream × branch local (feito: branch `unity-il2cpp`); aceitar MSVC
+  proprietário (pendente, F4); escopo do MVP (`Assembly-CSharp` — default do import).
+
+---
+
+## F1 — Import + projeto scratch (14/10/2026) ✅
+
+Implementado no checkout do decomp.wtf (`~/tools/decomp.wtf`, branch `unity-il2cpp`):
+
+- `src/decompnet/forks/il2cppsplits.py`: PE (`.pdata` = boundaries exatos + folhas do mapa), inventário com
+  nomes do `symbols.txt`/`methods_final.json` (flat `Namespace_Type_Method`), unidades por assembly/cluster,
+  **COFF-alvo sintético por unidade** (bytes + símbolos + relocs REL32 de calls/jmps/`[rip+disp]`, campo
+  zerado; para no padding `int3` — as jump tables inline do MSVC ficam intactas), `objdiff.json`
+  (`custom_make=ninja`, `functionRelocDiffs=none`), `include/context.h`, `build.ninja` com clang
+  `--target=x86_64-pc-windows-msvc -O2`.
+- `src/decompnet/forks/scratch_unity.py`: `is_unity`, `game_info` (título do `*_Data/app.info`, versão do
+  `globalgamemanagers`, sha1 do DLL, metadata/nome protegido), `create` (orig/ com hardlink, manifest,
+  README, primeiro `ninja`, git init/commit).
+- Hooks: `create_scratch` despacha Unity (platform `win32`), `import_rom`/`_community_layout` aceitam pasta
+  ou `GameAssembly.dll`, `place_game` aceita pasta, `import_game` do MCP aceita pasta, overview leva `unity`,
+  guia `il2cpp`.
+- Símbolos: auto-descoberta em `symbols.txt`/`methods_final.json` na pasta (ou `symbols/`, `decomp/`,
+  `dumps/decomp/`) e `DECOMPWTF_UNITY_SYMBOLS=<arquivo|pasta>` (uso Apogea: o mapa fica em `apogea-rea`).
+
+**Validação com o `game-real` (2021.3.45f2):**
+
+- `import_rom(pasta)` → projeto `apogea`, 6.000 funções / 50 unidades (default), 63.520 nomeadas no total
+  (`--all` = 146.411 funções), report do objdiff em segundos.
+- `claim ChatHoverDetector_OnPointerEnter` → asm + draft Ghidra (`S3`).
+- `attempt` com o C do F0 → **39.7%** (build do unit + diff reloc-aware; o gap é o clang×MSVC esperado).
+
+**Teste automatizado** (`tests/test_unity.py`): PE sintético (4 funções: uma com `call`, uma com `[rip+disp]`,
+uma sem nome, uma folha sem unwind) + mapa de símbolos; import → claim → edit_file → attempt; e um caso
+byte-exato: o teste compila o C com as flags do projeto, usa os bytes como “original” e o agente dá match
+100%. Sem conteúdo de jogo (fixtures sintéticas).
+
+**Como usar (Apogea):** no app/MCP, `import_game("<game-real>/")` com o mapa acessível (`DECOMPWTF_UNITY_SYMBOLS`).
+O default gera 6.000 funções priorizando `Assembly-CSharp`; `python tools/il2cppsplit.py --all` no projeto
+gera todas (não sobrescreve fontes já editadas).

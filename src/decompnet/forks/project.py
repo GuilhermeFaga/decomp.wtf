@@ -212,6 +212,11 @@ class ForkProject:
         if not need["path"]:
             raise ForkError("decomp.wtf doesn't know where this project expects the game; follow its README")
         src = Path(src)
+        if src.is_dir():  # a game folder: take the file the project needs out of it (Unity: GameAssembly.dll)
+            inner = src / Path(need["path"]).name
+            if not Path(need["path"]).name or not inner.is_file():
+                raise ForkError(f"{src} is a folder and has no {Path(need['path']).name or 'game file'} inside it")
+            src = inner
         if need.get("sha1") and _sha1(src) != need["sha1"]:
             inner = self._from_disc(src.read_bytes(), Path(need["path"]).name) if src.stat().st_size < 1 << 30 else None
             if inner is None or hashlib.sha1(inner).hexdigest() != need["sha1"]:
@@ -254,12 +259,14 @@ class ForkProject:
             m = self.manifest
             cmds = m.get("setup", [])
             if m.get("created") == "from scratch" and cmds:  # point at this computer's tools, not the creator's
-                from . import scratch_dsd, scratch_dtk
+                from . import scratch_dsd, scratch_dtk, scratch_unity
 
-                args = (scratch_dsd if m.get("platform") == "nds" else scratch_dtk).tool_args()
+                args = (scratch_dsd if m.get("platform") == "nds" else scratch_unity if m.get("platform") == "win32"
+                        else scratch_dtk).tool_args()
                 first = cmds[0]
                 keep = next((i for i, c in enumerate(first) if c.startswith("--")), len(first))
-                cmds = [[*first[:keep], *args], *cmds[1:]]
+                if args:
+                    cmds = [[*first[:keep], *args], *cmds[1:]]
             return [[sys.executable if c == "python" else c for c in cmd] for cmd in cmds]
         if kind == "dtk":
             cmd = [sys.executable, "configure.py"]

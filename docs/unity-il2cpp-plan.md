@@ -258,11 +258,39 @@ Executado (detalhes/evidências em `docs/unity-il2cpp/RESULTS.md`):
 | S0 | Projeto objdiff aberto como fork no app, zero patch (API: `/api/fork` + `/api/fork/check`) | ✅ `unity-spike` listado, fuzzy 49.4% |
 | S1 | objdiff-cli 3.8.2 × COFF x86-64 | ✅ |
 | S2 | Inventário `.pdata`+símbolos (`docs/unity-il2cpp/s2_inventory.py`) | ✅ 135.954 funções; 53.063/63.520 starts |
-| S3 | Draft Ghidra x86-64 | ⏳ pendente (caminho já existe no decomp) |
+| S3 | Draft Ghidra x86-64 | ✅ Ghidra 12.1.4 instalado pelo registry (`toolchain install ghidra`); `claim` devolve draft real (ex.: `ObjectRotator_ctor` → `Behaviour_ctor(this,0)`) |
 | S4 | Delink + diff real (`docs/unity-il2cpp/s4_delink.py`) | ✅ 39.75% / 36% / 64.4% (clang×MSVC, esperado) |
 | S5 | clang×MSVC em 20 funções | ⏳ pendente (decisão §7.2) |
 
 Descoberta operacional importante: **existem dois builds** (o `game-real` = 2021.3.45f2, que tem o mapa de
 símbolos; o `Games/Apogea Playtest` = 2021.3.38f1, sem mapa) — o import deve pinar o DLL e validar o mapa
-por build. Próximo passo natural: **F1** (o gerador `il2cppsplit` + `scratch_unity`) usando os scripts do F0
-como semente.
+por build.
+
+---
+
+## 10. F1 — Resultados (14/10/2026) ✅
+
+Implementado no branch `unity-il2cpp` do checkout (`~/tools/decomp.wtf`), usando os scripts do F0 como semente:
+
+| Peça | Onde |
+|---|---|
+| Gerador (PE/`.pdata`, inventário, unidades, COFF-alvo, `objdiff.json`, `context.h`, ninja) | `src/decompnet/forks/il2cppsplits.py` |
+| Maker do scratch (detecção da pasta/DLL, `orig/`, manifest, README, primeiro build, git) | `src/decompnet/forks/scratch_unity.py` (**novo**) |
+| Hooks no core | `forkengine.create_scratch` (terceiro maker, `platform=win32`, `unity` no cfg), `engine.import_rom/_community_layout` (pasta/DLL Unity), `project.setup_commands` (manifest win32), `chat.import_game` (aceita pasta), `overview.info` |
+| Guia | `app/guide/il2cpp.md` (+ `tools.GUIDES`/`PLATFORM_GUIDES` via `unity` no overview) |
+| Teste | `tests/test_unity.py` (PE sintético; E2E: import → claim → edit_file → attempt; e match 100% com bytes compilados pelo próprio teste) |
+
+Aceite do plano **cumprido**: `import_game(pasta Apogea)` cria o fork no app; `project_info` mostra
+“started from scratch (Windows PC, 2021.3.45f2)”; `claim_function` devolve asm + draft Ghidra; `check`
+mede o report; 6.000 funções em 50 arquivos (`--all` gera as 146.411). Validado com o `game-real`:
+
+- import (com `DECOMPWTF_UNITY_SYMBOLS=dumps/decomp`): 6.000 funções, 63.520 nomeadas no total, 50 unidades.
+- `attempt` do `ChatHoverDetector_OnPointerEnter` (C do F0): **39.7%** — o loop completo (build do unit + diff).
+- draft Ghidra no claim (`S3` acima).
+
+Pendências desta fase: S5 (calibração clang×MSVC), `--all`/módulos restantes (F2), `context.h` completo e
+assinaturas do metadata (F2), relocs de jump tables / data symbols (F3), toolchain MSVC via wine (F4),
+parser do `global-metadata.dat` **não-protegido** (F2; no Apogea o mapa `--symbols` cobre).
+
+Próximo passo natural: **F2** (inventário completo + `context.h` com tipos/campos do metadata + primeiro
+lote de `Assembly-CSharp`: login/rede/zona/player).

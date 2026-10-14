@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
+from elftools.common.exceptions import ELFError
 from elftools.elf.elffile import ELFFile
 
 from ..elfobj import _function_symbols, _section_target
@@ -101,8 +102,8 @@ def mismatches(target: Path, base: Path, symbol: str, insns: list[tuple[int, str
     the function, mnemonic), in order)."""
     try:
         left, right = _Object(target), _Object(base)
-    except (OSError, ValueError):
-        return []
+    except (OSError, ValueError, ELFError):
+        return []  # not an ELF object (COFF, Mach-O): this check doesn't apply
     if left.machine != right.machine or left.machine not in ("EM_PPC", "EM_MIPS"):
         return []
     try:

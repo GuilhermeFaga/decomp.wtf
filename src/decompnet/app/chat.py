@@ -101,11 +101,12 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
     @mcp.tool(meta=tools.ALWAYS_LOAD)
     async def import_game(ctx: Context, path: str, own_copy: bool = False, compiler: str = "") -> str:
         """Start decompiling a game from scratch: the user's own ROM, disc image or program file on this computer
-        (N64, PlayStation 1/2, GameCube, Wii, Game Boy Advance, DS). Finds every function and the compiler, then
-        tries every function's machine draft in the background (free matches).
+        (N64, PlayStation 1/2, GameCube, Wii, Game Boy Advance, DS), or a Unity game's folder (its
+        GameAssembly.dll, Windows x64: IL2CPP). Finds every function and the compiler, then tries every
+        function's machine draft in the background (free matches).
 
         Args:
-            path: the game file on this computer
+            path: the game file on this computer, or a Unity game's folder (GameAssembly.dll)
             own_copy: true only after the user confirmed it's their own legally obtained copy
             compiler: optional compiler id; leave empty to let decomp.wtf pick
         """
@@ -114,10 +115,10 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
             raise ToolError("ask the user to confirm this is their own legally obtained copy of the game, then call "
                             "import_game again with own_copy=true")
         game = hostenv.local_path(path)
-        if not game.is_file():
+        if not game.exists():  # a file (ROM, disc image, program) or a Unity game's folder
             hint = {"wsl": " (decomp.wtf runs in WSL: Windows drives are under /mnt, e.g. C:\\ is /mnt/c)",
                     "docker": " (decomp.wtf runs in Docker and sees your home folder only)"}.get(hostenv.runtime(), "")
-            raise ToolError(f"no file at {game}{hint}")
+            raise ToolError(f"nothing at {game}{hint}")
 
         def work(log):
             slug = net.import_rom(game, toolchain=compiler or None, confirmed=True, name=game.name, log=log)

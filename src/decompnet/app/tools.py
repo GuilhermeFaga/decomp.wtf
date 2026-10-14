@@ -35,6 +35,7 @@ GUIDES = {
     "agbcc": "matching Game Boy Advance code built with agbcc",
     "x86": "x86 and MSVC (PC, Xbox): calling conventions, SEH, matching MSVC output",
     "aarch64": "AArch64 and Clang (Switch): registers, matching Clang output",
+    "il2cpp": "Unity IL2CPP (Windows x64): generated-code patterns, flat names, matching MSVC x64",
     "similarity": "finding similar functions and reusing matched code",
 }
 

@@ -301,14 +301,18 @@ class RomNetwork(Network):
 
     def import_rom(self, data: bytes | Path, *, toolchain: str | None = None, flags: list[str] | None = None,
                    confirmed: bool = False, name: str = "", log=print) -> str:
-        """Import a game the user owns (ROM bytes, or a file such as a disc image): split it, store every function
-        as a target. Returns the slug."""
+        """Import a game the user owns (ROM bytes, or a file such as a disc image or a Unity game folder): split
+        it, store every function as a target. Returns the slug."""
         if not confirmed:
             raise NetworkError("confirm that this is your own legally obtained copy of the game")
         project_file = self._community_layout(data, name)
-        if project_file is not None:  # a dtk-template or ds-decomp project, worked on like a fork
+        if project_file is not None:  # a dtk-template, ds-decomp or Unity project, worked on like a fork
             compiler = toolchain if toolchain and toolchain.startswith(("GC/", "Wii/", "DS/")) else None
             return self.forks.create_scratch(project_file, compiler=compiler, log=log)
+        if isinstance(data, (str, Path)) and Path(data).is_dir():
+            raise NetworkError("that's a folder. For a Unity (IL2CPP) game, give the game's folder (the one with "
+                               "GameAssembly.dll) or its GameAssembly.dll; for a console game, give its ROM, disc "
+                               "image or program file")
         picked = detect.identify(data, name)
         rom, info = picked.data, picked.info
         for p in self.store.all("SELECT slug, config FROM projects"):
@@ -434,9 +438,16 @@ class RomNetwork(Network):
 
     def _community_layout(self, data: bytes | Path, name: str = "") -> Path | None:
         """The file, when the game starts as a community-layout project: a GameCube/Wii program (DOL) or disc image
-        (dtk-template), or a DS ROM (ds-decomp). Bytes are saved to a file first."""
-        from ..forks import scratch_dsd, scratch_dtk
+        (dtk-template), a DS ROM (ds-decomp), or a Unity game folder/GameAssembly.dll (an objdiff project this
+        app generates from the PE). Bytes are saved to a file first."""
+        from ..forks import scratch_dsd, scratch_dtk, scratch_unity
 
+        if isinstance(data, (str, Path)):
+            p = Path(data)
+            if (p.is_dir() or p.suffix.lower() == ".dll") and scratch_unity.is_unity(p):
+                return p
+            if p.is_dir():
+                return None
         head = Path(data).open("rb").read(0x440) if isinstance(data, (str, Path)) else bytes(data[:0x440])
         small = Path(data).read_bytes() if isinstance(data, (str, Path)) and Path(data).stat().st_size < 64 << 20 else data
         nds = scratch_dsd.is_nds(head)

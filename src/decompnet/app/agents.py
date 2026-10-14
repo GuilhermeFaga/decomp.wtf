@@ -676,6 +676,8 @@ class Manager:
         ov = self.net.overview(s.slug)
         if ov.get("kind") == "fork":
             guides = ["fork", "objdiff", *tools.PLATFORM_GUIDES.get(ov.get("platform") or "", [])]
+            if ov.get("unity"):
+                guides.append("il2cpp")
             return tools.FORK_PROMPT.format(title=ov["title"], platform=ov.get("platform_name") or "its platform",
                                             count=s.options.get("per_session", PER_SESSION),
                                             guides=", ".join(f'guide("{g}")' for g in guides))
