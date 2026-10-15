@@ -1333,10 +1333,11 @@ class RomNetwork(Network):
     # ------------------------------------------------------------------ autopilot
 
     def start_autopilot(self, slug: str, workers: int = 3) -> dict:
-        """Try every open function's machine draft (m2c, compilable form) through the judge, smallest first, in the
-        background. Whatever already matches is saved before any agent spends a token on it; drafts that compile
-        become the function's best attempt, so agents start from them. Agents and autopilot never collide: a
-        function is held only while its draft compiles, and claimed ones are skipped."""
+        """Try every open function's machine draft (m2c's compilable form; Ghidra's C on the platforms m2c
+        doesn't read, like Unity's x86-64) through the judge, smallest first, in the background. Whatever
+        already matches is saved before any agent spends a token on it; drafts that compile become the
+        function's best attempt, so agents start from them. Agents and autopilot never collide: a function is
+        held only while its draft compiles, and claimed ones are skipped."""
         state = self.autopilots.get(slug)
         if state and state["state"] == "running":
             return state

@@ -19,7 +19,7 @@ import pytest
 
 from decompnet import toolchains
 from decompnet.app.engine import RomNetwork
-from decompnet.forks import il2cppsplits, scratch_unity
+from decompnet.forks import coff, ghidra, il2cppsplits, scratch_unity
 from decompnet.forks.project import ForkProject
 from decompnet.network import NetworkError
 
@@ -270,10 +270,10 @@ def test_import_claim_and_match(tmp_path):
 
 
 @needs_tools
-def test_names_outside_the_project_and_autopilot_say_what_to_do(tmp_path):
+def test_names_outside_the_project_say_what_to_do(tmp_path):
     """The Apogea case: target assembly calls functions the project's units don't cover (still named
     `func_<address>`), and agents try to open them. get_function points at what exists, or says the call is
-    written by hand; autopilot says m2c can't read x86 instead of asking Setup for the toolchain it has."""
+    written by hand instead of leaving the agent to guess."""
     game = make_game(tmp_path)
     base = tmp_path / "app"
     base.mkdir()
@@ -284,5 +284,62 @@ def test_names_outside_the_project_and_autopilot_say_what_to_do(tmp_path):
         net.forks.get_function(agent, slug, "func_1020")  # the gap between two functions
     with pytest.raises(NetworkError, match="list_functions"):
         net.forks.get_function(agent, slug, "func_9999")  # nothing of the project anywhere near
-    with pytest.raises(NetworkError, match="Windows PC"):
+
+
+def test_a_unit_object_says_what_it_calls(tmp_path):
+    """Autopilot declares a unit's externals before a Ghidra draft calls them, and they come from the target
+    object's symbol table (data references are absolute symbols there, calls undefined functions)."""
+    game = make_game(tmp_path)
+    root = tmp_path / "proj"
+    il2cppsplits.generate(root, game / "GameAssembly.dll", log=lambda *_: None)
+    funcs, data = coff.externals(root / "target" / "Assembly-CSharp" / "000.obj")
+    assert (funcs, data) == ([], ["data_3000"])
+    assert 'extern "C" unsigned char data_3000;' in ghidra.declarations(funcs, data, cpp=True)
+    header = root / "include" / "context.h"
+    assert ghidra.add_types(header) and "GHIDRA_DEFINES" in header.read_text()
+    assert not ghidra.add_types(header)  # once is enough
+
+
+@needs_clang
+def test_the_ghidra_block_compiles_a_draft(tmp_path):
+    """A draft only gets anywhere if it builds: Ghidra's types, its CONCAT/SUB/ZEXT helpers and `code` (called
+    through with arguments) have to compile as C++ against the header drafts are written into."""
+    header = tmp_path / "context.h"
+    header.write_text(ghidra.TYPES, encoding="utf-8")
+    draft = tmp_path / "draft.cpp"
+    draft.write_text('#include "context.h"\n'
+                     'extern "C" unsigned long long caller(undefined8 p, ulong n) {\n'
+                     "  code *fn = (code *)CONCAT44(n, p);\n"
+                     "  (*fn)(p, 1, 2);\n"
+                     "  return ZEXT48(SUB84(p, 0)) + CONCAT31(p, 7) + SEXT48(p);\n"
+                     "}\n", encoding="utf-8")
+    subprocess.run(["clang++", "--target=x86_64-pc-windows-msvc", "-O2", "-std=c++17", "-I", str(tmp_path),
+                    str(draft), "-c", "-o", str(tmp_path / "draft.obj")], check=True)
+
+
+@needs_tools
+def test_autopilot_takes_a_ghidra_platform(tmp_path, monkeypatch):
+    """Windows x86-64: m2c can't read it, so the drafts come from Ghidra. Autopilot says so when Ghidra is
+    missing, takes the project when it's there (adding Ghidra's types to the header), and declares the unit's
+    externals once so a draft that calls them compiles."""
+    game = make_game(tmp_path)
+    base = tmp_path / "app"
+    base.mkdir()
+    net = RomNetwork(base / "app.db", base / "work")
+    slug = net.import_rom(game, confirmed=True, log=lambda *_: None)
+    monkeypatch.setattr(ghidra, "available", lambda: False)
+    with pytest.raises(NetworkError, match="come from Ghidra"):
         net.forks.autopilot_prepare(slug)
+    monkeypatch.undo()
+    if not ghidra.available():
+        pytest.skip("needs Ghidra and Java 21")
+    assert len(net.forks.autopilot_prepare(slug)) == 4
+    root = Path(net.project_row(slug)["root"])
+    assert "GHIDRA_DEFINES" in (root / "include" / "context.h").read_text()
+    agent, _ = net.local_agent("autopilot")
+    fp = net.forks.get(slug)[1]
+    source = root / "src" / "Assembly-CSharp" / "000.cpp"
+    net.forks._prepare_draft_decls(agent, net.project_row(slug), fp, fp.unit("Assembly-CSharp/000"))
+    assert 'extern "C" unsigned char data_3000;' in source.read_text()
+    net.forks._prepare_draft_decls(agent, net.project_row(slug), fp, fp.unit("Assembly-CSharp/000"))
+    assert 'data_3000;' in source.read_text() and source.read_text().count("data_3000;") == 1

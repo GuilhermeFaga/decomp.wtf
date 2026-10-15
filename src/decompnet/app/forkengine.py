@@ -24,7 +24,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from .. import similarity, toolchains
-from ..forks import catalog, csource, datadiff, drafts, dtksplits, ghidra, scratch_dsd, scratch_dtk, scratch_unity
+from ..forks import catalog, coff, csource, datadiff, drafts, dtksplits, ghidra, scratch_dsd, scratch_dtk, scratch_unity
 from ..forks.objdiff import ObjdiffError
 from ..forks.project import EDITABLE, STATE, ForkError, ForkProject
 from ..network import Agent, Network, NetworkError
@@ -39,6 +39,9 @@ _CHEAT = re.compile(r"\b(__asm__|__asm|asm|_asm)\b|INCLUDE_ASM|GLOBAL_ASM|INCLUD
 # `register int x asm("r4");` binds a variable to a register: an accepted matching technique (pret's GBA
 # projects use it), not assembly code, so it doesn't count as inline asm.
 _REGVAR = re.compile(r"\b(?:asm|__asm__|__asm)\s*\(\s*\"\$?[a-z]{1,2}\d{0,2}\"\s*\)", re.I)
+
+# Left in a unit's source when autopilot declares the object's externals for the machine drafts to call.
+_DECLS_MARK = "declared loosely for the machine drafts"
 
 
 def _strip_comments(code: str) -> str:
@@ -1322,7 +1325,8 @@ class ForkEngine:
         return "\n".join(lines)
 
     def _draft(self, proj, fp: ForkProject, cfg: dict, fn, unit) -> str | None:
-        """m2c draft from the project's assembly for this function, cached in the database."""
+        """m2c draft from the project's assembly for this function, cached in the database (Ghidra's when m2c
+        doesn't read the platform)."""
         if fn["seed"] is not None:
             return fn["seed"] or None
         hint = (unit.scratch or {}).get("compiler", "") or json.dumps(fp.needs(cfg.get("version")))
@@ -1331,16 +1335,50 @@ class ForkEngine:
             text = drafts.draft(fp.root, cfg.get("platform") or "", unit.name, meta.get("symbol") or fn["name"],
                                 unit.source, compiler_hint=hint)
             text = text and "/* m2c */\n" + text
-            if not text and unit.target is not None and unit.target.exists() and ghidra.available():
-                found = ghidra.decompile_object(unit.target, fp.root / STATE / "ghidra")
-                names = [meta.get("symbol") or fn["name"], *self._names(meta, fn)]
-                body = next((found[n] for n in names if n in found), None)
-                text = body and "/* Ghidra */\n" + body.strip()
+            if not text:
+                text = self._ghidra_draft(fp, unit, fn, meta)
         except OSError:
             text = None
         with self.net.store.tx() as db:
             db.execute("UPDATE functions SET seed=? WHERE id=?", (text or "", fn["id"]))
         return text
+
+    def _callee_prototypes(self, proj, fp: ForkProject, unit, fn, draft: str) -> list[str]:
+        """Ghidra's own prototypes for the same unit's functions a draft calls: C++ needs a call's function
+        declared before use, and declaring it inside the draft's body keeps the file's definitions (an agent's,
+        with whatever types it worked out) out of the way."""
+        found = ghidra.decompile_object(unit.target, fp.root / STATE / "ghidra")
+        out = []
+        rows = self.net.store.all("SELECT name, meta FROM functions WHERE project_id=? AND unit=?",
+                                  proj["id"], unit.name)
+        mine = {fn["name"], self._meta(fn).get("symbol")}
+        for row in rows:
+            meta = self._meta(row)
+            name = meta.get("symbol") or row["name"]
+            if name in mine or not re.search(rf"(?<![\w:~]){re.escape(name)}\s*\(", draft):
+                continue
+            body = next((found[n] for n in (name, *self._names(meta, row)) if n in found), None)
+            proto = body and ghidra.prototype(body, name)
+            if not proto:
+                continue
+            if ghidra.param_count(proto) != ghidra.arg_count(draft, name):
+                # this draft calls it with other arguments than its own decompilation takes: take anything
+                proto = re.sub(r"[(].*[)]\s*;$", "(...);", proto)
+            out.append(proto)
+        return out
+
+    def _ghidra_draft(self, fp: ForkProject, unit, fn, meta) -> str | None:
+        """Ghidra's C for one function: headless Ghidra analyses a unit's target object once (cached next to
+        the project) and decompiles all of it, so this is cheap after the first function of a unit."""
+        if unit.target is None or not unit.target.exists() or not ghidra.available():
+            return None
+        try:
+            found = ghidra.decompile_object(unit.target, fp.root / STATE / "ghidra")
+        except OSError:
+            return None
+        names = [meta.get("symbol") or fn["name"], *self._names(meta, fn)]
+        body = next((found[n] for n in names if n in found), None)
+        return body and "/* Ghidra */\n" + body.strip()
 
     def claim(self, agent: Agent, slug: str, function: str | None = None, strategy: str = "easiest") -> str:
         if (link := self.net.links.get(slug)) is not None:
@@ -1496,7 +1534,7 @@ class ForkEngine:
                 self.net._record(fn, agent, None, code, 0)
                 why = "" if builds else ("\n(The file didn't build before your change either, so the error may be in "
                                          "other code of the file: fix that with edit_file.)")
-                return {"text": f"❌ BUILD ERROR (your change was undone){why}\n{log[-3000:]}", "score": None,
+                return {"text": f"❌ BUILD ERROR (your change was undone){why}\n{log}", "score": None,
                         "matched": False}
             try:
                 d = fp.diff(unit, symbol)
@@ -1564,17 +1602,58 @@ class ForkEngine:
         if not cfg.get("ready"):
             raise NetworkError("finish setting the project up first")
         platform = cfg.get("platform") or ""
-        if not drafts.supported(platform):
-            raise NetworkError(f"autopilot tries m2c's machine drafts, and m2c doesn't read "
-                               f"{catalog.PLATFORMS.get(platform, platform)} (MIPS, PowerPC and ARM only): claim a "
-                               "function and write it — where a draft is shown, it comes from Ghidra")
-        if toolchains.installed("m2c") is None:
-            raise NetworkError("autopilot needs m2c, the draft decompiler: install it in Setup")
-        if drafts.add_m2c_macros(fp.root / "include" / "common.h"):  # projects made before autopilot ran on them
-            self._commit(proj, fp, "include/common.h", "Add the macros machine drafts use\n\nWritten by decomp.wtf's autopilot.")
+        header = next((p for p in (fp.root / "include" / "common.h", fp.root / "include" / "context.h")
+                       if p.exists()), None)
+        if drafts.supported(platform):  # m2c reads this platform
+            if toolchains.installed("m2c") is None:
+                raise NetworkError("autopilot needs m2c, the draft decompiler: install it in Setup")
+            if header is not None and drafts.add_m2c_macros(header):  # projects made before autopilot ran on them
+                self._commit(proj, fp, header.relative_to(fp.root).as_posix(),
+                             "Add the macros machine drafts use\n\nWritten by decomp.wtf's autopilot.")
+        else:  # x86, AArch64, ...: the drafts come from Ghidra
+            if not ghidra.available():
+                raise NetworkError(f"autopilot's drafts for {catalog.PLATFORMS.get(platform, platform)} come from "
+                                   "Ghidra: install it in Setup (it needs Java 21)")
+            if header is not None and ghidra.add_types(header):
+                self._commit(proj, fp, header.relative_to(fp.root).as_posix(),
+                             "Add the types machine drafts use\n\nWritten by decomp.wtf's autopilot.")
         rows = self.net.store.all("SELECT id FROM functions WHERE project_id=? AND status='open' ORDER BY n_insns, id",
                                   proj["id"])
         return [r["id"] for r in rows]
+
+    def _prepare_draft_decls(self, agent: Agent, proj, fp: ForkProject, unit) -> None:
+        """Put a unit's externals (what its original called or read without defining) into its source file, as
+        loosely as the language allows: a Ghidra draft calls them by name knowing nothing about them."""
+        if not unit.source or unit.target is None or not unit.target.exists():
+            return
+        path = fp.root / unit.source
+        try:
+            text = path.read_text(errors="replace", encoding="utf-8")
+        except OSError:
+            return
+        if _DECLS_MARK in text:
+            return
+        funcs, data = coff.externals(unit.target)
+        if not funcs and not data:
+            return
+        declared = text + "".join(p.read_text(errors="replace", encoding="utf-8")
+                                  for p in (fp.root / "include").glob("**/*.h"))
+
+        def fresh(names: list[str]) -> list[str]:
+            return [n for n in names if not re.search(rf"\b{re.escape(n)}\b", declared)]
+
+        funcs, data = fresh(funcs), fresh(data)
+        if not funcs and not data:
+            return
+        cpp = Path(unit.source).suffix.lower() in (".cpp", ".cc", ".cxx", ".cp")
+        block = ghidra.declarations(funcs, data, cpp=cpp)
+        m = re.search(r"^[ \t]*#\s*include\b.*$", text, re.M)
+        old = m.group(0) if m else ""
+        try:
+            self.edit_file(agent, proj["slug"], unit.source, old, f"{old}\n\n{block}" if old else block,
+                           "Declare what machine drafts call")
+        except (NetworkError, OSError) as e:
+            logging.getLogger("decomp.wtf").info("autopilot: couldn't declare %s's externals: %s", unit.name, e)
 
     def autopilot_one(self, agent: Agent, proj, fid: int) -> str:
         """match | near | far | fail | skip, for one function's machine draft, built and diffed like an agent's."""
@@ -1592,16 +1671,33 @@ class ForkEngine:
                 return "skip"
             meta = self._meta(fn)
             hint = (unit.scratch or {}).get("compiler", "") or json.dumps(fp.needs(cfg.get("version")))
-            text = drafts.draft(fp.root, cfg.get("platform") or "", unit.name, meta.get("symbol") or fn["name"],
-                                unit.source, compiler_hint=hint, valid=True)
-            _, span = self._find(text, self._names(meta, fn)) if text else (None, None)
+            platform = cfg.get("platform") or ""
+            text, drafter = None, ""
+            if drafts.supported(platform):
+                text = drafts.draft(fp.root, platform, unit.name, meta.get("symbol") or fn["name"],
+                                    unit.source, compiler_hint=hint, valid=True)
+                drafter = "m2c"
+            if text is None and ghidra.available():  # the platforms m2c doesn't read: Ghidra does
+                self._prepare_draft_decls(agent, proj, fp, unit)
+                text = self._ghidra_draft(fp, unit, fn, meta)
+                drafter = "Ghidra"
+            if text is None:
+                return "fail"
+            if drafter == "Ghidra":
+                # the unit's own functions the draft calls, declared inside its body (see _callee_prototypes)
+                text += "\n" + "\n".join(self._callee_prototypes(proj, fp, unit, fn, text)) + "\n"
+            _, span = self._find(text, self._names(meta, fn))
             if span is None:
                 return "fail"
             try:
                 current = (fp.root / unit.source).read_text(errors="replace", encoding="utf-8")
             except OSError:
                 current = ""
-            code = "/* machine draft (m2c), tried by autopilot */\n" + drafts.self_contained(text, span, current)
+            definition = drafts.self_contained(text, span, current)
+            if Path(unit.source).suffix.lower() in (".cpp", ".cc", ".cxx", ".cp"):
+                # the target's symbol is the plain name: C++ would mangle it
+                definition = re.sub(r'^(\s*)(?!extern\s+"C")', r'\1extern "C" ', definition, count=1)
+            code = f"/* machine draft ({drafter}), tried by autopilot */\n{definition}"
             res = self.attempt(agent, proj["slug"], fn["name"], code, keep=False)
             if res["matched"]:
                 return "match"
@@ -1764,7 +1860,7 @@ class ForkEngine:
                 if not ok:
                     if bases[u.name][1]:
                         undo()
-                        return f"❌ {rel} doesn't compile after your edit, so it was undone:\n{log[-2500:]}"
+                        return f"❌ {rel} doesn't compile after your edit, so it was undone:\n{log}"
                     after[u.name] = None  # it didn't build before the edit either
                     continue
                 try:
@@ -1828,7 +1924,7 @@ class ForkEngine:
             if newly:
                 undo()
                 return (f"❌ after your edit {len(newly)} file(s) no longer compile ({', '.join(newly[:5])}), so it was "
-                        f"undone. Build output:\n{log[-2500:]}")
+                        f"undone. Build output:\n{log}")
             try:
                 rep = fp.report()
             except (ObjdiffError, ForkError) as e:
