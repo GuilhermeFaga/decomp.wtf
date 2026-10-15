@@ -120,6 +120,24 @@ def _codex_config() -> dict:
         return {}
 
 
+def opencode_v2(path: str) -> bool:
+    """opencode 2 dropped `run --dir` (it uses the process's directory, which is the working folder we start it in)
+    and wants a lower-case log level. The version comes from the same cache detect() fills."""
+    cached = _versions.get("opencode")
+    if cached is None or time.time() - cached[0] > 300:
+        version = None
+        try:
+            res = subprocess.run(argv([path, "--version"]), capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=15)
+            out = (res.stdout or res.stderr).strip()
+            version = out.splitlines()[0][:60] if out else None
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        _versions["opencode"] = (time.time(), version)
+    m = re.search(r"(\d+)\.", _versions["opencode"][1] or "")
+    return bool(m and int(m.group(1)) >= 2)
+
+
 def _config_model(kind: str) -> str | None:
     """The model the user set as default in the agent's own settings, if any."""
     home = Path.home()
@@ -692,6 +710,7 @@ class Manager:
         if not exe:
             raise RuntimeError(f"{k.name} is not installed")
         env = dict(os.environ)
+        env["PWD"] = str(workdir)  # what reads the working folder from $PWD (opencode 2's session directory) sees it
         if WIN:
             env["PATH"] = search_path()  # the agent finds node (and what it needs) even when installed after the app
         prompt = self.prompt(s)
@@ -743,7 +762,11 @@ class Manager:
                 "permission": {"edit": never, "bash": never, "webfetch": never},
             }), encoding="utf-8")
             # --print-logs: opencode's JSON error only says "Unexpected server error"; the log line says what failed
-            cmd = [exe, "run", "--format", "json", "--dir", str(workdir), "--print-logs", "--log-level", "ERROR"]
+            v2 = opencode_v2(exe)
+            cmd = [exe, "run", "--format", "json", "--print-logs"]
+            if not v2:
+                cmd += ["--dir", str(workdir)]  # opencode 1 only; 2 works in the process's own directory
+            cmd += ["--log-level", "error" if v2 else "ERROR"]
             if model:
                 cmd += ["-m", model]
         else:
