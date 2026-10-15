@@ -21,6 +21,7 @@ from decompnet import toolchains
 from decompnet.app.engine import RomNetwork
 from decompnet.forks import il2cppsplits, scratch_unity
 from decompnet.forks.project import ForkProject
+from decompnet.network import NetworkError
 
 IMAGE_BASE = 0x180000000
 NAMES = {0x1000: "TestNs_Alpha_Sum", 0x1010: "TestNs_Beta_Run", 0x1040: "TestNs_Gamma_Leaf"}
@@ -266,3 +267,22 @@ def test_import_claim_and_match(tmp_path):
     agent2, _ = net.local_agent("unity-agent-2")
     res = net.attempt(agent2, "Demo_Mul", source, slug2)
     assert res["matched"], res["text"]
+
+
+@needs_tools
+def test_names_outside_the_project_and_autopilot_say_what_to_do(tmp_path):
+    """The Apogea case: target assembly calls functions the project's units don't cover (still named
+    `func_<address>`), and agents try to open them. get_function points at what exists, or says the call is
+    written by hand; autopilot says m2c can't read x86 instead of asking Setup for the toolchain it has."""
+    game = make_game(tmp_path)
+    base = tmp_path / "app"
+    base.mkdir()
+    net = RomNetwork(base / "app.db", base / "work")
+    slug = net.import_rom(game, confirmed=True, log=lambda *_: None)
+    agent, _ = net.local_agent("unity-agent")
+    with pytest.raises(NetworkError, match="Closest function: func_1030"):
+        net.forks.get_function(agent, slug, "func_1020")  # the gap between two functions
+    with pytest.raises(NetworkError, match="list_functions"):
+        net.forks.get_function(agent, slug, "func_9999")  # nothing of the project anywhere near
+    with pytest.raises(NetworkError, match="Windows PC"):
+        net.forks.autopilot_prepare(slug)

@@ -73,6 +73,7 @@ PLATFORM_COMPILERS = {"n64": ["gcc-2.7.2-kmc", "ido-7.1", "ido-5.3"], "psx": ["g
                       "ps2": ["ee-gcc-2.96"], "gba": ["agbcc"]}
 _AUTO_TOKEN = re.compile(r"\b(?:func|D|B|jtbl|RO|STR|FLT|DBL)_[0-9A-F]{8}\b")
 _ADDRESS = re.compile(r"^(?:0x)?([0-9A-Fa-f]{8})$")
+_FUNC_NAME = re.compile(r"^func_([0-9A-Fa-f]+)$")
 
 GP_NOTE = """
 /* This game keeps small globals (8 bytes or less) in $gp-relative small data. Declare those here WITHOUT
@@ -204,13 +205,13 @@ class RomNetwork(Network):
                 return row
         try:
             return super()._function(name, project)
-        except NetworkError:
+        except NetworkError as e:
             rows = self._loose_functions(name, project) if name else []
             if len(rows) == 1:
                 return rows[0]
             if rows:
                 raise NetworkError(self._ambiguous(name, rows)) from None
-            raise
+            raise NetworkError(f"{e}{self._miss_hint(name, project)}") from None
 
     def _loose_functions(self, name: str, project: str | None) -> list:
         """Functions an agent may mean by a name that isn't stored as such: the plain symbol of a function whose
@@ -242,6 +243,38 @@ class RomNetwork(Network):
         more = f"\n... and {len(rows) - 12} more" if len(rows) > 12 else ""
         return (f"{name!r} is the name of {len(rows)} functions in different files; pass the full name:\n"
                 f"{listing}{more}")
+
+    def _miss_hint(self, name: str, project: str | None) -> str:
+        """What a name that isn't a function here likely is. Generators name every unnamed function
+        `func_<address>`, and a call to one the project has no file for keeps that name too: agents read it in
+        target assembly and try to open it, so point at the closest functions that do exist."""
+        m = _FUNC_NAME.match((name or "").strip())
+        if m is None:
+            return ""
+        try:
+            proj = self._project(project)
+        except NetworkError:
+            return ""
+        digits, addr = m.group(1), int(m.group(1), 16)
+        near: list[tuple[int, str]] = []
+        for cut in (2, 3):  # a 0x100-, then a 0x1000-byte window: the name is the address in hex
+            if len(digits) <= cut:
+                break
+            for r in self.store.all("SELECT name FROM functions WHERE project_id=? AND name LIKE ?",
+                                    proj["id"], f"func_{digits[:-cut]}%"):
+                mm = _FUNC_NAME.match(r["name"])
+                if mm:
+                    near.append((int(mm.group(1), 16) - addr, r["name"]))
+            if near:
+                break
+        if not near:
+            return (". It isn't one of the project's functions: nothing covers it here, so a call to it is matched "
+                    "by hand — declare the callee and write the call. list_functions lists them.")
+        near.sort(key=lambda t: abs(t[0]))
+        d, fn = near[0]
+        where = f"{abs(d):#x} bytes {'before' if d < 0 else 'after'}"
+        return (f". Closest function: {fn} ({where}) — an address names a function only where one starts. "
+                "list_functions lists them.")
 
     def resolve_function(self, agent: Agent | None, project: str | None, name: str) -> str:
         """The stored name for what an agent calls a function: when a plain name fits several, the one the agent

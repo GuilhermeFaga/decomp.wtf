@@ -1563,7 +1563,12 @@ class ForkEngine:
                                "what machine drafts need, and its easy functions are done already")
         if not cfg.get("ready"):
             raise NetworkError("finish setting the project up first")
-        if not drafts.supported(cfg.get("platform") or "") or toolchains.installed("m2c") is None:
+        platform = cfg.get("platform") or ""
+        if not drafts.supported(platform):
+            raise NetworkError(f"autopilot tries m2c's machine drafts, and m2c doesn't read "
+                               f"{catalog.PLATFORMS.get(platform, platform)} (MIPS, PowerPC and ARM only): claim a "
+                               "function and write it — where a draft is shown, it comes from Ghidra")
+        if toolchains.installed("m2c") is None:
             raise NetworkError("autopilot needs m2c, the draft decompiler: install it in Setup")
         if drafts.add_m2c_macros(fp.root / "include" / "common.h"):  # projects made before autopilot ran on them
             self._commit(proj, fp, "include/common.h", "Add the macros machine drafts use\n\nWritten by decomp.wtf's autopilot.")
