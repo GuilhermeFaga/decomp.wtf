@@ -174,7 +174,9 @@ def diff(target: Path | None, base: Path | None, symbol: str | None, cwd: Path, 
     if symbol is None:
         right = None
     if right is not None and pct is None:
-        pct = 100.0 if all(m == " " for m, _, _ in rows) else 0.0
+        # An empty side is never a match: clang removes a body it can prove nothing about (a machine draft
+        # reading an uninitialized local, say), and the two sides have to have instructions to compare at all.
+        pct = 100.0 if lrows and rrows and all(m == " " for m, _, _ in rows) else 0.0
     built = {s.get("name") for s in (data.get("right") or {}).get("symbols", [])}
     funcs = [s for s in (data.get("left") or {}).get("symbols", []) if s.get("kind") == "SYMBOL_FUNCTION"]
     scores = {s["name"]: (float(s["match_percent"]) if s.get("match_percent") is not None and s["name"] in built else None)

@@ -81,6 +81,7 @@ _SRC_DIR = re.compile(r'^\s*config\.src_dir\s*=\s*Path\(\s*"([^"]+)"\s*\)', re.M
 _CHECK = re.compile(r"^build (\S+[/\\]ok): check\b")  # dtk-template writes build\<version>\ok on Windows
 # A target the build couldn't make: ninja's "FAILED: out.o", make's "make: *** [Makefile:12: out.o] Error 1"
 _FAILED = re.compile(r"^FAILED: (.+)$|^make(?:\[\d+\])?: \*\*\* \[(?:[^\]]*?:\d+: )?([^\]]+)\] Error")
+_ERROR = re.compile(r"error:|(?<!Warning: )\bError\b|error\b.*\bgenerated|undefined reference|multiple definition|FAILED:")
 # CodeWarrior's linker warns about every FORCEACTIVE symbol and unknown section: harmless, and thousands of lines
 _NOISE = re.compile(r"^#{1,3}\s*(mwldeppc\.exe Linker Warning:|FORCEACTIVE symbol|(doesn't )?exist\.\s+Ignored\.|"
                     r"Section '\.note\.split' is unknown)")
@@ -319,7 +320,15 @@ class ForkProject:
         if killed_for_memory(code):
             out.append("stopped: it used more memory than decomp.wtf allows a single tool, so it was stopped "
                        "before it could slow down or freeze your computer")
-        return code == 0, "\n".join(out[-60:])
+        if code == 0:
+            return True, "\n".join(out[-60:])
+        # A failed build's last 60 lines can be all warnings, the reason scrolled off the top: keep the errors too.
+        earlier = [i for i, line in enumerate(out[:-60]) if _ERROR.search(line)]
+        keep: list[str] = []
+        for i in earlier[:8]:
+            keep += [line for line in out[max(0, i - 1):i + 1] if line not in keep]
+        tail = [f"({len(out) - 60} earlier lines, the errors among them:)", *keep, "...", *out[-60:]] if keep else out[-60:]
+        return False, "\n".join(tail)
 
     def unpack_disc(self, version: str | None, log=print) -> int:
         """A dtk project that reads an extracted disc (orig/<version>/sys/main.dol, files/...) instead of the disc

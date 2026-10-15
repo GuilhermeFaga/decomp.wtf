@@ -14,7 +14,7 @@ import pytest
 
 from decompnet import toolchains
 from decompnet.app.engine import RomNetwork
-from decompnet.forks import catalog, csource
+from decompnet.forks import catalog, csource, il2cppsplits, objdiff
 from decompnet.network import NetworkError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -149,6 +149,20 @@ def test_function_detail(fork):
     net, slug, agent = fork
     d = net.function_detail(slug, "clamp_s32")
     assert d["status"] == "matched" and "slt" in d["asm"] and "clamp_s32" in d["source"]
+
+
+@pytest.mark.skipif(toolchains.installed("objdiff-cli") is None, reason="needs objdiff-cli")
+def test_an_empty_function_never_reads_as_a_match(tmp_path):
+    """objdiff reports the target's instructions with no diff_kind when nothing on the other side is paired
+    with them, and a diff of all-blank rows used to read as 100%: a function clang compiled away (a machine
+    draft reading an uninitialized pseudo-local, say) was committed as a match."""
+    sym = [("demo", 0, 1, il2cppsplits.STYPE_FUNCTION, il2cppsplits.CLASS_EXTERNAL)]
+    il2cppsplits.write_coff(tmp_path / "t.obj", bytes.fromhex("31c0c3"), sym, [])
+    il2cppsplits.write_coff(tmp_path / "b.obj", b"", sym, [])
+    d = objdiff.diff(tmp_path / "t.obj", tmp_path / "b.obj", "demo", cwd=tmp_path)
+    assert d.match_percent == 0.0 and not d.matched
+    il2cppsplits.write_coff(tmp_path / "b2.obj", bytes.fromhex("31c0c3"), sym, [])
+    assert objdiff.diff(tmp_path / "t.obj", tmp_path / "b2.obj", "demo", cwd=tmp_path).matched
 
 
 def test_csource_finds_definitions_and_stubs():
