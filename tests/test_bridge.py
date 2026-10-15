@@ -7,15 +7,29 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 ROM = ROOT / "projects" / "demo-rom" / "build" / "demo-quest-64.z64"
 
-pytestmark = pytest.mark.skipif(not ROM.exists(), reason="needs the demo ROM (projects/demo-rom)")
+needs_rom = pytest.mark.skipif(not ROM.exists(), reason="needs the demo ROM (projects/demo-rom)")
 
 
+def test_a_new_app_on_the_same_port_gets_a_new_identity():
+    """An app restart on the same port leaves this bridge's token stale and every call answers "invalid API
+    token" -- as an error result, not an exception, so the reconnect logic has to look for it."""
+    from decompnet.app.bridge import stale_token
+
+    def result(text):
+        return SimpleNamespace(content=[SimpleNamespace(text=text)])
+    assert stale_token(result("Error executing tool list_projects: invalid API token"))
+    assert not stale_token(result("no function 'func_1adc340' in 'apogea'. Closest function: func_1adc330"))
+    assert not stale_token(SimpleNamespace(content=[]))
+
+
+@needs_rom
 def test_bridge_imports_and_works(tmp_path):
     from mcp import Client, StdioServerParameters
 

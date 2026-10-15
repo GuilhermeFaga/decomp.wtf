@@ -34,6 +34,14 @@ def _running(state: Path) -> dict | None:
     return info if info.get("port") and _alive(info["port"]) else None
 
 
+def stale_token(result) -> bool:
+    """True for the app's answer when the token this bridge holds is from an app that has since restarted on
+    the same port (an update, or the user started it again): every tool call says "invalid API token" until
+    the bridge mints a new identity. It comes back as an error *result*, not an exception."""
+    content = getattr(result, "content", None) or []
+    return "invalid api token" in " ".join(getattr(x, "text", "") or "" for x in content).lower()
+
+
 def ensure_app(home: Path) -> dict:
     """The running app's {port, secret}, starting it in the background first if needed."""
     internal = home / ".decomp"
@@ -127,15 +135,17 @@ async def proxy(info: dict, token: str, name: str) -> None:
                 await changed.wait_for(lambda: conn["remote"] is not None)
                 remote, gen = conn["remote"], conn["gen"]
             try:
-                return await fn(remote)
+                result = await fn(remote)
+                if attempt or not stale_token(result):
+                    return result
             except Exception as e:
                 if attempt or not lost(e):
                     raise
-                async with changed:
-                    if conn["gen"] == gen:  # the first call to notice: ask for a new session
-                        conn["remote"] = None
-                        want_new.set()
-                    await changed.wait_for(lambda: conn["gen"] > gen)
+            async with changed:
+                if conn["gen"] == gen:  # the first call to notice: ask for a new session
+                    conn["remote"] = None
+                    want_new.set()
+                await changed.wait_for(lambda: conn["gen"] > gen)
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(keep_connected)
